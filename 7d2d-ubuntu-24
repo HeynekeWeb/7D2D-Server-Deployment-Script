@@ -35,7 +35,7 @@ pct create $CTID $STORAGE:vztmpl/ubuntu-$UBUNTU_VER-standard_amd64.tar.zst \
   --cores $CPU_CORES \
   --memory $RAM \
   --swap 0 \
-  --disk $DISK_SIZE \
+  --rootfs $STORAGE:$DISK_SIZE \
   --net0 name=eth0,bridge=vmbr0,ip=$NET_MODE \
   --ostype ubuntu \
   --password "changeme" \
