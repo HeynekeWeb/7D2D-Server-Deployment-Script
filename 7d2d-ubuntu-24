@@ -1,0 +1,160 @@
+#!/bin/bash
+
+# ===========================
+# 7D2D Proxmox LXC Deployment
+# ===========================
+
+# Prompt user for LXC settings
+read -p "Enter LXC ID (Default: 100): " CTID
+CTID=${CTID:-100}
+read -p "Enter LXC Name (Default: 7D2D-Server): " CT_NAME
+CT_NAME=${CT_NAME:-7D2D-Server}
+read -p "Enter CPU Cores (Default: 4): " CPU_CORES
+CPU_CORES=${CPU_CORES:-4}
+read -p "Enter RAM Size in MB (Default: 8192): " RAM
+RAM=${RAM:-8192}
+read -p "Enter Disk Size in GB (Default: 30): " DISK_SIZE
+DISK_SIZE=${DISK_SIZE:-30}
+read -p "Enter Network Mode (Default: dhcp): " NET_MODE
+NET_MODE=${NET_MODE:-dhcp}
+read -p "Enter Ubuntu Release (Default: 24.10): " UBUNTU_VER
+UBUNTU_VER=${UBUNTU_VER:-24.10}
+
+# Define storage location for LXC
+STORAGE="local-lvm"
+
+# Fetch latest Ubuntu LXC template
+echo "Downloading Ubuntu $UBUNTU_VER LXC template..."
+pveam update
+pveam download $STORAGE ubuntu-$UBUNTU_VER-standard_amd64.tar.zst
+
+# Create LXC Container
+echo "Creating LXC Container..."
+pct create $CTID $STORAGE:vztmpl/ubuntu-$UBUNTU_VER-standard_amd64.tar.zst \
+  --hostname $CT_NAME \
+  --cores $CPU_CORES \
+  --memory $RAM \
+  --swap 0 \
+  --disk $DISK_SIZE \
+  --net0 name=eth0,bridge=vmbr0,ip=$NET_MODE \
+  --ostype ubuntu \
+  --password "changeme" \
+  --features nesting=1 \
+  --unprivileged 1 \
+  --onboot 1
+
+# Set container start at boot
+pct set $CTID --onboot 1
+
+# Add Notes with Image
+echo "Adding Proxmox Notes..."
+qm set $CTID --description "<div align='center' style='width: 310px; height: 230px; overflow: hidden;'>
+    <img src='https://heyneke.co.za/assets/img/proxmox/7d2d-2.png' style='width: 310px; height: 230px; object-fit: cover;' />
+</div>"
+
+# Start the LXC Container
+echo "Starting Container..."
+pct start $CTID
+
+# Wait for container to be ready
+sleep 10
+
+# ======================================
+#  Install 7 Days to Die Server Inside LXC
+# ======================================
+echo "Installing 7 Days to Die Server..."
+
+# Execute installation commands inside the LXC
+pct exec $CTID -- bash -c "bash -s" <<'EOF'
+#!/bin/bash
+
+# Function to prompt user input with a default value
+prompt() {
+    local prompt_text="$1"
+    local default_value="$2"
+    read -p "$prompt_text [$default_value]: " input_value
+    echo "${input_value:-$default_value}"
+}
+
+# User inputs
+ROOT_USER=$(prompt "Enter root username" "root")
+ROOT_PASS=$(prompt "Enter root password" "changeme")
+SERVER_NAME=$(prompt "Enter server name" "My 7D2D Server")
+MAX_PLAYERS=$(prompt "Enter max players" "8")
+SERVER_DESC=$(prompt "Enter server description" "")
+SERVER_PASS=$(prompt "Enter server password (leave blank for none)" "")
+SERVER_VISIBILITY=$(prompt "Enter server visibility (0: Private, 2: Public)" "2")
+GAME_WORLD=$(prompt "Enter Game World" "Navezgane")
+WORLD_GEN_SEED=$(prompt "Enter World Generation Seed" "asdf")
+WORLD_GEN_SIZE=$(prompt "Enter World Generation Size (6144-10240, multiple of 1024)" "6144")
+GAME_NAME=$(prompt "Enter Game Name" "My Game")
+
+# Ensure system is updated
+apt update && apt upgrade -y
+
+# Install dependencies
+apt install -y steamcmd unzip wget iptables-persistent
+
+# Create user for the game server
+useradd -m -s /bin/bash 7d2d
+mkdir -p /home/7d2d/server
+chown -R 7d2d:7d2d /home/7d2d
+
+# Install 7 Days to Die Server
+sudo -u 7d2d steamcmd +login anonymous +force_install_dir /home/7d2d/server +app_update 294420 validate +quit
+
+# Generate serverconfig.xml
+cat <<EOL > /home/7d2d/server/serverconfig.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<ServerSettings>
+    <property name="ServerName" value="$SERVER_NAME" />
+    <property name="ServerDescription" value="$SERVER_DESC" />
+    <property name="ServerPassword" value="$SERVER_PASS" />
+    <property name="ServerVisibility" value="$SERVER_VISIBILITY" />
+    <property name="GameWorld" value="$GAME_WORLD" />
+    <property name="WorldGenSeed" value="$WORLD_GEN_SEED" />
+    <property name="WorldGenSize" value="$WORLD_GEN_SIZE" />
+    <property name="GameName" value="$GAME_NAME" />
+    <property name="ServerPort" value="26900" />
+</ServerSettings>
+EOL
+
+# Open necessary ports
+iptables -A INPUT -p udp --dport 26900:26902 -j ACCEPT
+iptables -A INPUT -p tcp --dport 26900 -j ACCEPT
+netfilter-persistent save
+
+# Create systemd service
+cat <<EOL > /etc/systemd/system/7d2d.service
+[Unit]
+Description=7 Days to Die Server
+After=network.target
+
+[Service]
+User=7d2d
+Group=7d2d
+ExecStart=/home/7d2d/server/7DaysToDieServer.x86_64 -configfile=serverconfig.xml -logfile logs/latest.log -quit -batchmode -nographics -dedicated
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+# Enable and start the service
+systemctl daemon-reload
+systemctl enable 7d2d
+systemctl start 7d2d
+
+# Set up automatic updates
+cat <<EOL > /etc/cron.daily/7d2d_update
+#!/bin/bash
+sudo -u 7d2d steamcmd +login anonymous +force_install_dir /home/7d2d/server +app_update 294420 validate +quit
+systemctl restart 7d2d
+EOL
+chmod +x /etc/cron.daily/7d2d_update
+
+echo "7 Days to Die Server installation complete!"
+EOF
+
+echo "7 Days to Die Server is now deployed inside LXC $CT_NAME (ID: $CTID)"
+echo "You can access the container using: pct exec $CTID -- bash"
